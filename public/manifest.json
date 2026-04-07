@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "LLM Bulk Analyzer",
+  "version": "1.0",
+  "description": "Analyze URLs for LLM readiness using Gemini AI.",
+  "permissions": ["activeTab", "scripting"],
+  "host_permissions": ["<all_urls>"],
+  "action": {
+    "default_popup": "index.html",
+    "default_title": "Open LLM Analyzer"
+  },
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
+}
