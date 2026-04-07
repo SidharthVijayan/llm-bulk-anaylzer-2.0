@@ -3,7 +3,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { 
   BarChart3, 
   AlertCircle, 
@@ -15,7 +15,9 @@ import {
   FileText,
   Zap,
   ArrowRight,
-  Layout
+  Layout,
+  Settings as SettingsIcon,
+  X
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { GoogleGenAI, Type } from "@google/genai";
@@ -46,9 +48,65 @@ export default function App() {
   const [results, setResults] = useState<AnalysisResult[]>([]);
   const [isAnalyzing, setIsAnalyzing] = useState(false);
   const [progress, setProgress] = useState(0);
+  const [showSettings, setShowSettings] = useState(false);
+  const [apiKey, setApiKey] = useState(process.env.GEMINI_API_KEY || '');
+  const [isExtension, setIsExtension] = useState(false);
+
+  useEffect(() => {
+    // Detect if running as a Chrome Extension
+    if (typeof chrome !== 'undefined' && chrome.runtime && chrome.runtime.id) {
+      setIsExtension(true);
+    }
+    
+    // Load API key from local storage if in extension
+    const savedKey = localStorage.getItem('GEMINI_API_KEY');
+    if (savedKey && !apiKey) {
+      setApiKey(savedKey);
+    }
+  }, []);
+
+  const saveApiKey = (key: string) => {
+    setApiKey(key);
+    localStorage.setItem('GEMINI_API_KEY', key);
+    setShowSettings(false);
+  };
+
+  const fetchAndParse = async (url: string) => {
+    if (isExtension) {
+      // Direct fetch in extension (bypasses CORS with host_permissions)
+      const response = await fetch(url);
+      const html = await response.text();
+      const parser = new DOMParser();
+      const doc = parser.parseFromString(html, 'text/html');
+      
+      return {
+        url,
+        title: doc.title || url,
+        structure: {
+          h1: doc.querySelectorAll('h1').length,
+          h2: doc.querySelectorAll('h2').length,
+          h3: doc.querySelectorAll('h3').length,
+          lists: doc.querySelectorAll('ul, ol').length,
+          paragraphs: doc.querySelectorAll('p').length,
+        },
+        textContent: doc.body.innerText.slice(0, 5000)
+      };
+    } else {
+      // Use proxy for web app
+      const proxyRes = await fetch('/api/analyze-url', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url })
+      });
+      if (!proxyRes.ok) throw new Error('Proxy fetch failed');
+      return await proxyRes.json();
+    }
+  };
 
   const analyzeWithGemini = async (data: any) => {
-    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY || '' });
+    if (!apiKey) throw new Error('Gemini API Key is missing. Please add it in Settings.');
+    
+    const ai = new GoogleGenAI({ apiKey });
     
     const prompt = `
       Analyze the following webpage data for "LLM Readiness". 
@@ -75,36 +133,31 @@ export default function App() {
          - visibility: A 1-sentence estimate of AI citation potential.
     `;
 
-    try {
-      const response = await ai.models.generateContent({
-        model: "gemini-3-flash-preview",
-        contents: prompt,
-        config: {
-          responseMimeType: "application/json",
-          responseSchema: {
-            type: Type.OBJECT,
-            properties: {
-              score: { type: Type.NUMBER },
-              achievable: { type: Type.NUMBER },
-              insights: {
-                type: Type.OBJECT,
-                properties: {
-                  readiness: { type: Type.STRING },
-                  opportunities: { type: Type.ARRAY, items: { type: Type.STRING } },
-                  visibility: { type: Type.STRING }
-                }
+    const response = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            score: { type: Type.NUMBER },
+            achievable: { type: Type.NUMBER },
+            insights: {
+              type: Type.OBJECT,
+              properties: {
+                readiness: { type: Type.STRING },
+                opportunities: { type: Type.ARRAY, items: { type: Type.STRING } },
+                visibility: { type: Type.STRING }
               }
-            },
-            required: ["score", "achievable", "insights"]
-          }
+            }
+          },
+          required: ["score", "achievable", "insights"]
         }
-      });
+      }
+    });
 
-      return JSON.parse(response.text || '{}');
-    } catch (err) {
-      console.error("Gemini analysis failed", err);
-      return null;
-    }
+    return JSON.parse(response.text || '{}');
   };
 
   const handleAnalyze = async () => {
@@ -114,6 +167,10 @@ export default function App() {
       .filter(u => u.startsWith('http'));
 
     if (urls.length === 0) return;
+    if (!apiKey) {
+      setShowSettings(true);
+      return;
+    }
 
     setIsAnalyzing(true);
     setProgress(0);
@@ -136,15 +193,7 @@ export default function App() {
       ));
 
       try {
-        const proxyRes = await fetch('/api/analyze-url', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ url })
-        });
-
-        if (!proxyRes.ok) throw new Error('Proxy fetch failed');
-        const rawData = await proxyRes.json();
-
+        const rawData = await fetchAndParse(url);
         const aiData = await analyzeWithGemini(rawData);
 
         if (!aiData) throw new Error('AI analysis failed');
@@ -196,7 +245,11 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-[#0f172a] text-slate-200 font-sans selection:bg-blue-500/30">
+    <div className={cn(
+      "min-h-screen bg-[#0f172a] text-slate-200 font-sans selection:bg-blue-500/30",
+      isExtension ? "w-[600px] h-[600px] overflow-auto" : "w-full"
+    )}>
+      {/* Header */}
       <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur-xl sticky top-0 z-50">
         <div className="max-w-7xl mx-auto px-6 h-16 flex items-center justify-between">
           <div className="flex items-center gap-3">
@@ -205,27 +258,38 @@ export default function App() {
             </div>
             <div>
               <h1 className="font-bold text-lg tracking-tight text-white">LLM Bulk Analyzer</h1>
-              <p className="text-xs text-slate-400 font-medium uppercase tracking-wider">AI Readiness Auditor</p>
+              <div className="flex items-center gap-2">
+                <p className="text-[10px] text-slate-400 font-medium uppercase tracking-wider">AI Readiness Auditor</p>
+                {isExtension && <span className="text-[10px] bg-blue-500/20 text-blue-400 px-1.5 py-0.5 rounded border border-blue-500/30">Extension</span>}
+              </div>
             </div>
           </div>
           
-          <div className="flex items-center gap-4">
-            {results.length > 0 && (
+          <div className="flex items-center gap-3">
+            <button 
+              onClick={() => setShowSettings(true)}
+              className="p-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors border border-slate-700 text-slate-400 hover:text-white"
+            >
+              <SettingsIcon size={18} />
+            </button>
+            {results.length > 0 && !isExtension && (
               <button 
                 onClick={exportCSV}
                 className="flex items-center gap-2 px-4 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 transition-colors text-sm font-medium border border-slate-700"
               >
                 <Download size={16} />
-                Export CSV
+                Export
               </button>
             )}
           </div>
         </div>
       </header>
 
-      <main className="max-w-7xl mx-auto px-6 py-10">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          <div className="lg:col-span-4 space-y-6">
+      <main className={cn("max-w-7xl mx-auto px-6 py-10", isExtension && "py-6")}>
+        <div className={cn("grid gap-8", isExtension ? "grid-cols-1" : "grid-cols-1 lg:grid-cols-12")}>
+          
+          {/* Input Panel */}
+          <div className={cn(isExtension ? "" : "lg:col-span-4", "space-y-6")}>
             <div className="bg-slate-900 rounded-2xl border border-slate-800 p-6 shadow-xl">
               <div className="flex items-center gap-2 mb-4">
                 <Globe className="text-blue-500 w-5 h-5" />
@@ -236,7 +300,7 @@ export default function App() {
                 value={urlInput}
                 onChange={(e) => setUrlInput(e.target.value)}
                 placeholder="Paste URLs here (one per line)...&#10;https://example.com/blog-post"
-                className="w-full h-64 bg-slate-950 border border-slate-800 rounded-xl p-4 text-sm font-mono focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 outline-none transition-all resize-none"
+                className="w-full h-48 bg-slate-950 border border-slate-800 rounded-xl p-4 text-sm font-mono focus:ring-2 focus:ring-blue-500/50 focus:border-blue-500 outline-none transition-all resize-none"
               />
               
               <button
@@ -278,30 +342,10 @@ export default function App() {
                 </div>
               )}
             </div>
-
-            <div className="bg-blue-500/5 rounded-2xl border border-blue-500/10 p-6">
-              <h3 className="text-blue-400 font-semibold mb-3 flex items-center gap-2">
-                <BarChart3 size={18} />
-                Analysis Criteria
-              </h3>
-              <ul className="space-y-3 text-sm text-slate-400">
-                <li className="flex items-start gap-2">
-                  <div className="mt-1 w-1 h-1 rounded-full bg-blue-500 shrink-0" />
-                  <span>Heading hierarchy (H1-H3) for semantic structure</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <div className="mt-1 w-1 h-1 rounded-full bg-blue-500 shrink-0" />
-                  <span>Content segmentation & list usage</span>
-                </li>
-                <li className="flex items-start gap-2">
-                  <div className="mt-1 w-1 h-1 rounded-full bg-blue-500 shrink-0" />
-                  <span>AI citation potential & visibility score</span>
-                </li>
-              </ul>
-            </div>
           </div>
 
-          <div className="lg:col-span-8">
+          {/* Results Panel */}
+          <div className={cn(isExtension ? "" : "lg:col-span-8")}>
             <div className="bg-slate-900 rounded-2xl border border-slate-800 overflow-hidden shadow-xl">
               <div className="p-6 border-b border-slate-800 flex items-center justify-between bg-slate-900/50">
                 <div className="flex items-center gap-2">
@@ -309,7 +353,7 @@ export default function App() {
                   <h2 className="font-semibold text-white">Analysis Results</h2>
                 </div>
                 <span className="text-xs font-mono text-slate-500 bg-slate-950 px-2 py-1 rounded border border-slate-800">
-                  {results.length} URLs Processed
+                  {results.length} URLs
                 </span>
               </div>
 
@@ -320,14 +364,14 @@ export default function App() {
                       key="empty"
                       initial={{ opacity: 0 }}
                       animate={{ opacity: 1 }}
-                      className="p-20 text-center space-y-4"
+                      className="p-12 text-center space-y-4"
                     >
-                      <div className="w-16 h-16 bg-slate-800 rounded-full flex items-center justify-center mx-auto">
-                        <FileText className="text-slate-600 w-8 h-8" />
+                      <div className="w-12 h-12 bg-slate-800 rounded-full flex items-center justify-center mx-auto">
+                        <FileText className="text-slate-600 w-6 h-6" />
                       </div>
                       <div>
                         <p className="text-slate-400 font-medium">No analysis data yet</p>
-                        <p className="text-sm text-slate-500">Enter URLs on the left to begin the audit</p>
+                        <p className="text-xs text-slate-500">Enter URLs to begin the audit</p>
                       </div>
                     </motion.div>
                   ) : (
@@ -339,7 +383,7 @@ export default function App() {
                         transition={{ delay: index * 0.05 }}
                         className="p-6 hover:bg-slate-800/30 transition-colors group"
                       >
-                        <div className="flex flex-col md:flex-row md:items-start justify-between gap-6">
+                        <div className="flex flex-col gap-4">
                           <div className="flex-1 min-w-0">
                             <div className="flex items-center gap-2 mb-1">
                               {result.status === 'completed' ? (
@@ -353,7 +397,7 @@ export default function App() {
                                 {result.title}
                               </h3>
                             </div>
-                            <p className="text-xs text-slate-500 font-mono truncate mb-4">{result.url}</p>
+                            <p className="text-[10px] text-slate-500 font-mono truncate mb-4">{result.url}</p>
                             
                             {result.insights && (
                               <div className="space-y-4">
@@ -392,8 +436,8 @@ export default function App() {
                             )}
                           </div>
 
-                          <div className="flex flex-row md:flex-col gap-4 shrink-0">
-                            <div className="bg-slate-950 rounded-2xl p-4 border border-slate-800 text-center min-w-[100px]">
+                          <div className="flex gap-4 shrink-0">
+                            <div className="bg-slate-950 rounded-2xl p-4 border border-slate-800 text-center flex-1">
                               <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">LLM Score</p>
                               <p className={cn(
                                 "text-3xl font-black",
@@ -404,7 +448,7 @@ export default function App() {
                                 {result.score || '--'}
                               </p>
                             </div>
-                            <div className="bg-slate-950 rounded-2xl p-4 border border-slate-800 text-center min-w-[100px]">
+                            <div className="bg-slate-950 rounded-2xl p-4 border border-slate-800 text-center flex-1">
                               <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Achievable</p>
                               <p className="text-3xl font-black text-blue-500">
                                 {result.achievable || '--'}
@@ -422,11 +466,72 @@ export default function App() {
         </div>
       </main>
 
-      <footer className="max-w-7xl mx-auto px-6 py-12 border-t border-slate-800 text-center">
-        <p className="text-sm text-slate-500">
-          Powered by Gemini 3 Flash • Built for Content Intelligence at Scale
-        </p>
-      </footer>
+      {/* Settings Modal */}
+      <AnimatePresence>
+        {showSettings && (
+          <div className="fixed inset-0 z-[100] flex items-center justify-center p-6">
+            <motion.div 
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+              onClick={() => setShowSettings(false)}
+              className="absolute inset-0 bg-slate-950/80 backdrop-blur-sm"
+            />
+            <motion.div 
+              initial={{ opacity: 0, scale: 0.95, y: 20 }}
+              animate={{ opacity: 1, scale: 1, y: 0 }}
+              exit={{ opacity: 0, scale: 0.95, y: 20 }}
+              className="relative w-full max-w-md bg-slate-900 rounded-3xl border border-slate-800 p-8 shadow-2xl"
+            >
+              <div className="flex items-center justify-between mb-6">
+                <div className="flex items-center gap-3">
+                  <SettingsIcon className="text-blue-500" size={24} />
+                  <h2 className="text-xl font-bold text-white">Settings</h2>
+                </div>
+                <button 
+                  onClick={() => setShowSettings(false)}
+                  className="p-2 rounded-full hover:bg-slate-800 text-slate-400 transition-colors"
+                >
+                  <X size={20} />
+                </button>
+              </div>
+
+              <div className="space-y-6">
+                <div>
+                  <label className="block text-sm font-semibold text-slate-300 mb-2">Gemini API Key</label>
+                  <input 
+                    type="password"
+                    value={apiKey}
+                    onChange={(e) => setApiKey(e.target.value)}
+                    placeholder="Enter your API key..."
+                    className="w-full bg-slate-950 border border-slate-800 rounded-xl px-4 py-3 text-sm focus:ring-2 focus:ring-blue-500/50 outline-none transition-all"
+                  />
+                  <p className="mt-2 text-[10px] text-slate-500 leading-relaxed">
+                    Your key is stored locally in your browser and never sent to our servers. 
+                    Get a key at <a href="https://aistudio.google.com/app/apikey" target="_blank" className="text-blue-500 hover:underline">AI Studio</a>.
+                  </p>
+                </div>
+
+                <button 
+                  onClick={() => saveApiKey(apiKey)}
+                  className="w-full py-3 bg-blue-600 hover:bg-blue-500 text-white font-bold rounded-xl transition-all active:scale-[0.98]"
+                >
+                  Save Configuration
+                </button>
+              </div>
+            </motion.div>
+          </div>
+        )}
+      </AnimatePresence>
+
+      {!isExtension && (
+        <footer className="max-w-7xl mx-auto px-6 py-12 border-t border-slate-800 text-center">
+          <p className="text-sm text-slate-500">
+            Powered by Gemini 3 Flash • Built for Content Intelligence at Scale
+          </p>
+        </footer>
+      )}
     </div>
   );
 }
+
