@@ -1,0 +1,5 @@
+{
+  "name": "LLM Bulk Analyzer",
+  "description": "Analyze multiple URLs for LLM readiness, structural clarity, and AI visibility potential using Gemini.",
+  "requestFramePermissions": []
+}
